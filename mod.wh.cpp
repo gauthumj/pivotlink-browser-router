@@ -80,7 +80,34 @@ std::wstring TrimString(const std::wstring& str) {
     return str.substr(first, (last - first + 1));
 }
 
-// Single-Pass converging search algorithm
+// Checks if a process has at least one visible top-level window (i.e., is truly "open")
+struct VisibleWindowCheck {
+    DWORD processId;
+    bool found;
+};
+
+static BOOL CALLBACK CheckVisibleWindowProc(HWND hwnd, LPARAM lParam) {
+    VisibleWindowCheck* check = reinterpret_cast<VisibleWindowCheck*>(lParam);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == check->processId && IsWindowVisible(hwnd)) {
+        RECT rect;
+        if (GetWindowRect(hwnd, &rect) && (rect.right - rect.left) > 1 && (rect.bottom - rect.top) > 1) {
+            check->found = true;
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static bool HasVisibleWindow(DWORD processId) {
+    VisibleWindowCheck check = { processId, false };
+    EnumWindows(CheckVisibleWindowProc, reinterpret_cast<LPARAM>(&check));
+    return check.found;
+}
+
+// Finds the highest-priority browser that is actively open (has a visible window).
+// Background-only processes (e.g., Edge service workers) are ignored.
 std::wstring GetHighestPriorityRunningBrowser() {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return L"";
@@ -88,25 +115,31 @@ std::wstring GetHighestPriorityRunningBrowser() {
     PROCESSENTRY32W pe;
     pe.dwSize = sizeof(pe);
     
-    size_t highestIndex = g_priorityBrowsers.size();
-    std::wstring bestMatch = L"";
+    // Collect PIDs for each priority browser found in the process list
+    std::vector<std::vector<DWORD>> browserPids(g_priorityBrowsers.size());
 
     if (Process32FirstW(hSnap, &pe)) {
         do {
-            for (size_t i = 0; i < highestIndex; ++i) {
+            for (size_t i = 0; i < g_priorityBrowsers.size(); ++i) {
                 if (_wcsicmp(pe.szExeFile, g_priorityBrowsers[i].c_str()) == 0) {
-                    highestIndex = i;
-                    bestMatch = g_priorityBrowsers[i];
-                    break; 
+                    browserPids[i].push_back(pe.th32ProcessID);
+                    break;
                 }
             }
-            // Optimization: If the absolute #1 ranked browser is active, stop scanning immediately
-            if (highestIndex == 0) break; 
-            
         } while (Process32NextW(hSnap, &pe));
     }
     CloseHandle(hSnap);
-    return bestMatch;
+
+    // Return the highest-priority browser that has at least one visible window
+    for (size_t i = 0; i < g_priorityBrowsers.size(); ++i) {
+        for (DWORD pid : browserPids[i]) {
+            if (HasVisibleWindow(pid)) {
+                return g_priorityBrowsers[i];
+            }
+        }
+    }
+    
+    return L"";
 }
 
 std::wstring GetCurrentProcessName() {
