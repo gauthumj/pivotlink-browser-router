@@ -85,26 +85,51 @@ static BOOL CALLBACK CheckVisibleWindowProc(HWND hwnd, LPARAM lParam) {
     VisibleWindowCheck* check = reinterpret_cast<VisibleWindowCheck*>(lParam);
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == check->processId && IsWindowVisible(hwnd)) {
-        // Skip tool windows (tray icons, notification popups, etc.)
-        LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
+    if (pid != check->processId) return TRUE;
 
-        // Real browser windows have a title bar with page/app name
-        if (GetWindowTextLengthW(hwnd) == 0) return TRUE;
+    BOOL visible = IsWindowVisible(hwnd);
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    int titleLen = GetWindowTextLengthW(hwnd);
+    WCHAR title[256] = {};
+    GetWindowTextW(hwnd, title, 256);
+    RECT rect = {};
+    GetWindowRect(hwnd, &rect);
 
-        RECT rect;
-        if (GetWindowRect(hwnd, &rect) && (rect.right - rect.left) > 1 && (rect.bottom - rect.top) > 1) {
-            check->found = true;
-            return FALSE;
-        }
+    Wh_Log(L"  PID %u hwnd=%p visible=%d minimized=%d toolWnd=%d title(%d)=\"%s\" rect=[%d,%d,%d,%d]",
+        pid, hwnd, visible,
+        (style & WS_MINIMIZE) ? 1 : 0,
+        (exStyle & WS_EX_TOOLWINDOW) ? 1 : 0,
+        titleLen, title,
+        rect.left, rect.top, rect.right, rect.bottom);
+
+    if (!visible) {
+        Wh_Log(L"  -> Skipped: not visible");
+        return TRUE;
     }
-    return TRUE;
+    if (exStyle & WS_EX_TOOLWINDOW) {
+        Wh_Log(L"  -> Skipped: tool window");
+        return TRUE;
+    }
+    if (titleLen == 0) {
+        Wh_Log(L"  -> Skipped: no title");
+        return TRUE;
+    }
+    if ((rect.right - rect.left) <= 1 || (rect.bottom - rect.top) <= 1) {
+        Wh_Log(L"  -> Skipped: rect too small");
+        return TRUE;
+    }
+
+    Wh_Log(L"  -> MATCH: valid browser window");
+    check->found = true;
+    return FALSE;
 }
 
 static bool HasVisibleWindow(DWORD processId) {
+    Wh_Log(L"HasVisibleWindow checking PID %u", processId);
     VisibleWindowCheck check = { processId, false };
     EnumWindows(CheckVisibleWindowProc, reinterpret_cast<LPARAM>(&check));
+    Wh_Log(L"HasVisibleWindow PID %u result: %s", processId, check.found ? L"FOUND" : L"NOT FOUND");
     return check.found;
 }
 
@@ -138,13 +163,16 @@ std::wstring GetHighestPriorityRunningBrowser() {
     CloseHandle(hSnap);
 
     for (size_t i = 0; i < browsers.size(); ++i) {
+        Wh_Log(L"Checking browser[%d]: %s (%d PIDs found)", (int)i, browsers[i].c_str(), (int)browserPids[i].size());
         for (DWORD pid : browserPids[i]) {
             if (HasVisibleWindow(pid)) {
+                Wh_Log(L"Winner: %s (PID %u)", browsers[i].c_str(), pid);
                 return browsers[i];
             }
         }
     }
     
+    Wh_Log(L"No running browser found");
     return L"";
 }
 
@@ -188,7 +216,9 @@ bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR*
     if (!isLink) return false;
 
     std::wstring currentProc = GetCurrentProcessName();
+    Wh_Log(L"RouteLinkIfNecessary: URL=%s from=%s", lpFile, currentProc.c_str());
     std::wstring targetBrowser = GetHighestPriorityRunningBrowser();
+    Wh_Log(L"Target browser result: \"%s\"", targetBrowser.c_str());
 
     if (!targetBrowser.empty()) {
         // Prevent circular routing inside the target browser
