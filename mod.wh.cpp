@@ -5,6 +5,7 @@
 // @version        1.0
 // @author         gauthumj
 // @github         https://github.com/gauthumj
+// @homepage       https://www.gauthumj.in/
 // @include        *
 // @compilerOptions -lshell32
 // @license        MIT
@@ -53,6 +54,15 @@ PivotLink intercepts outgoing URL launches system-wide and redirects them to whi
 - browser5: ""
   $name: Priority 5 Browser (Lowest)
   $description: Fifth choice browser fallback. Leave blank to skip.
+- bypassMethod: xbutton1
+  $name: Bypass Method
+  $description: How to skip routing and let the OS default browser handle a link.
+  $options:
+  - xbutton1: Mouse Back Button (hold while clicking)
+  - xbutton2: Mouse Forward Button (hold while clicking)
+  - rightclick: Right + Left Click (hold right, then left-click)
+  - ctrl: Ctrl (hold while clicking — tab may open in background)
+  - none: Disabled
 */
 // ==/WindhawkModSettings==
 
@@ -66,6 +76,10 @@ PivotLink intercepts outgoing URL launches system-wide and redirects them to whi
 
 std::mutex g_settingsMutex;
 std::vector<std::wstring> g_priorityBrowsers;
+
+enum class BypassMethod { None, XButton1, XButton2, RightClick, Ctrl };
+BypassMethod g_bypassMethod = BypassMethod::XButton1;
+
 thread_local bool t_inHook = false; 
 
 std::wstring TrimString(const std::wstring& str) {
@@ -171,8 +185,17 @@ void LoadSettings() {
         }
     }
 
+    auto bypassSetting = WindhawkUtils::StringSetting::make(L"bypassMethod");
+    std::wstring bypassStr = TrimString(bypassSetting.get());
+    BypassMethod method = BypassMethod::XButton1;
+    if (_wcsicmp(bypassStr.c_str(), L"xbutton2") == 0) method = BypassMethod::XButton2;
+    else if (_wcsicmp(bypassStr.c_str(), L"rightclick") == 0) method = BypassMethod::RightClick;
+    else if (_wcsicmp(bypassStr.c_str(), L"ctrl") == 0) method = BypassMethod::Ctrl;
+    else if (_wcsicmp(bypassStr.c_str(), L"none") == 0) method = BypassMethod::None;
+
     std::lock_guard<std::mutex> lock(g_settingsMutex);
     g_priorityBrowsers = std::move(browsers);
+    g_bypassMethod = method;
 }
 
 using ShellExecuteExW_t = decltype(&ShellExecuteExW);
@@ -180,6 +203,26 @@ ShellExecuteExW_t ShellExecuteExW_Original;
 
 bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR* lpParameters, int nShow) {
     if (!lpFile || t_inHook) return false;
+
+    // Check bypass trigger
+    BypassMethod method;
+    { std::lock_guard<std::mutex> lock(g_settingsMutex); method = g_bypassMethod; }
+    switch (method) {
+        case BypassMethod::XButton1:
+            if (GetAsyncKeyState(VK_XBUTTON1) & 0x8000) return false;
+            break;
+        case BypassMethod::XButton2:
+            if (GetAsyncKeyState(VK_XBUTTON2) & 0x8000) return false;
+            break;
+        case BypassMethod::RightClick:
+            if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) return false;
+            break;
+        case BypassMethod::Ctrl:
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) return false;
+            break;
+        case BypassMethod::None:
+            break;
+    }
 
     // Only redirect default (NULL) or "open" verbs
     if (lpVerb && _wcsicmp(lpVerb, L"open") != 0) return false;
@@ -316,6 +359,26 @@ BOOL WINAPI CreateProcessW_Hook(
     LPPROCESS_INFORMATION lpProcessInformation)
 {
     if (lpCommandLine && !t_inHook) {
+        // Check bypass trigger
+        BypassMethod method;
+        { std::lock_guard<std::mutex> lock(g_settingsMutex); method = g_bypassMethod; }
+        switch (method) {
+            case BypassMethod::XButton1:
+                if (GetAsyncKeyState(VK_XBUTTON1) & 0x8000) goto passthrough;
+                break;
+            case BypassMethod::XButton2:
+                if (GetAsyncKeyState(VK_XBUTTON2) & 0x8000) goto passthrough;
+                break;
+            case BypassMethod::RightClick:
+                if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) goto passthrough;
+                break;
+            case BypassMethod::Ctrl:
+                if (GetAsyncKeyState(VK_CONTROL) & 0x8000) goto passthrough;
+                break;
+            case BypassMethod::None:
+                break;
+        }
+
         // Skip if the calling process is itself a configured browser —
         // prevents catching internal browser URLs (cr.brave.com, telemetry)
         // and cascading redirects when the default browser starts up.
